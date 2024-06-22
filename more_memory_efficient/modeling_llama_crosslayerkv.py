@@ -26,19 +26,19 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_outputs import (
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from ...modeling_utils import PreTrainedModel
-from ...pytorch_utils import ALL_LAYERNORM_LAYERS
-from ...utils import (
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
@@ -46,7 +46,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_llama import LlamaConfig
+from transformers.models.llama.configuration_llama import LlamaConfig
 
 
 if is_flash_attn_2_available():
@@ -232,7 +232,13 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+    def __init__(
+        self, 
+        config: LlamaConfig, 
+        q_proj,
+        k_proj,
+        layer_idx: Optional[int] = None,
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -259,8 +265,8 @@ class LlamaAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.q_proj = q_proj
+        self.k_proj = k_proj
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=config.attention_bias)
         self._init_rope()
@@ -668,11 +674,11 @@ LLAMA_ATTENTION_CLASSES = {
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    def __init__(self, config: LlamaConfig, q_proj, k_proj, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, q_proj=q_proj, k_proj=k_proj, layer_idx=layer_idx)
 
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -872,8 +878,51 @@ class LlamaModel(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
+        if hasattr(config, "sharing_factor"):
+            sharing_factor = config.sharing_factor
+        else:
+            sharing_factor = 1
+        
+        remainder = config.num_hidden_layers % sharing_factor
+        self.mapping = {}
+        if remainder:
+            q_proj = nn.Linear(
+                self.hidden_size, 
+                self.num_heads * self.head_dim, 
+                bias=config.attention_bias
+            )
+            k_proj = nn.Linear(
+                self.hidden_size, 
+                self.num_key_value_heads * self.head_dim, 
+                bias=config.attention_bias
+            )
+        
+            for k in range(remainder):
+                self.mapping[k] = (q_proj, k_proj)
+        
+        for i in range(remainder, config.num_hidden_layers, sharing_factor):
+            q_proj = nn.Linear(
+                self.hidden_size, 
+                self.num_heads * self.head_dim, 
+                bias=config.attention_bias
+            )
+            k_proj = nn.Linear(
+                self.hidden_size, 
+                self.num_key_value_heads * self.head_dim, 
+                bias=config.attention_bias
+            )
+            for k in range(i, min(i + sharing_factor, config.num_hidden_layers), 1):
+                self.mapping[k] = (q_proj, k_proj)
+
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, self.mapping[i][0], self.mapping[i][1], layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
@@ -1222,14 +1271,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
     ):
         past_length = 0
         if past_key_values is not None:
-            # Past key values are always initialized with a `Cache` object -> no need for if-else anymore
-            past_length = cache_position[0] if cache_position is not None else past_key_values.get_seq_length()
-            max_cache_length = (
-                torch.tensor(past_key_values.get_max_length(), device=input_ids.device)
-                if past_key_values.get_max_length() is not None
-                else None
-            )
-            cache_length = past_length if max_cache_length is None else torch.min(max_cache_length, past_length)
+            if isinstance(past_key_values, Cache):
+                past_length = cache_position[0] if cache_position is not None else past_key_values.get_seq_length()
+                max_cache_length = (
+                    torch.tensor(past_key_values.get_max_length(), device=input_ids.device)
+                    if past_key_values.get_max_length() is not None
+                    else None
+                )
+                cache_length = past_length if max_cache_length is None else torch.min(max_cache_length, past_length)
+            # TODO joao: remove this `else` after `generate` prioritizes `Cache` objects
+            else:
+                cache_length = past_length = past_key_values[0][0].shape[2]
+                max_cache_length = None
 
             # Keep only the unprocessed tokens:
             # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where

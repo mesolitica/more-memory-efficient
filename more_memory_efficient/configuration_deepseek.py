@@ -154,7 +154,6 @@ class DeepseekV2Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
-        sharing_factor=3,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -197,7 +196,6 @@ class DeepseekV2Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.sharing_factor = sharing_factor
 
         super().__init__(
             pad_token_id=pad_token_id,
