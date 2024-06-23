@@ -20,14 +20,15 @@ def main(max_length = 100):
     inputs = torch.tensor([[1]]).cuda()
     # warmup
     model.generate(input_ids = inputs, max_length = 2)
-    
-    torch.cuda.memory._record_memory_history()
+
     before = time.time()
     model.generate(input_ids = inputs, max_length = max_length)
     after = time.time()
-    torch.cuda.memory._dump_snapshot(f"llama3_64m-{max_length}.pickle")
-    with open(f'llama3_64m-{max_length}.time_taken', 'w') as fopen:
-        json.dump(after - before, fopen)
+    with open(f'llama3_64m-{max_length}.data', 'w') as fopen:
+        json.dump({
+            'time taken':after - before,
+            'memory use': torch.cuda.max_memory_allocated(device=None),
+        }, fopen)
 
 if __name__ == "__main__":
     max_length = int(sys.argv[1])
