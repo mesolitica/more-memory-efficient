@@ -7,6 +7,8 @@ More memory efficient on top of available Decoder models!
 
 ## Benchmark
 
+**All models randomly initialized, zero training done**.
+
 ### Llama 3
 
 #### Memory usage
