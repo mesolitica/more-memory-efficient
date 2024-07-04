@@ -5,3 +5,4 @@ llama3-vs-llama3-crosslayerkv.ipynb
 *.time_taken
 *.data
 *__MACOSX
+*.whl
