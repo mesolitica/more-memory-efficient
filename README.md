@@ -1,15 +1,15 @@
 # more-memory-efficient
 
-More memory efficient on top of available Decoder models! 
+More memory efficient on top of Llama model!
 
-- Original source code DeepSeek V2 from https://huggingface.co/deepseek-ai/DeepSeek-V2
-- Original source code Llama from https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/llama/modeling_llama.py
+1. Cross Layer KV, https://arxiv.org/pdf/2405.12981
+2. Offload and partition Attention, derived from https://arxiv.org/abs/2402.05099
 
 ## Benchmark
 
-**All models randomly initialized, zero training done**.
+### Cross Layer KV
 
-### Llama 3
+**All models randomly initialized, zero training done**.
 
 #### Memory usage
 
@@ -18,3 +18,9 @@ More memory efficient on top of available Decoder models!
 #### Time taken
 
 ![alt text](time-taken-llama3.png)
+
+### Offload and partition Attention
+
+Tested using TinyLlama 1.1B.
+
+![alt text](offload-attention.png)
